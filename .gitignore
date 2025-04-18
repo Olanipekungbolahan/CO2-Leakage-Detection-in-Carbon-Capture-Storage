@@ -1,0 +1,71 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+venv/
+ENV/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*.ipynb_checkpoints/
+
+# MLflow
+mlruns/
+
+# Model files
+models/*.joblib
+models/*.onnx
+models/neural_network_model/
+
+# Monitoring
+monitoring/data/
+
+# Redis
+dump.rdb
+
+# Logs
+*.log
+
+# Coverage reports
+htmlcov/
+.coverage
+coverage.xml
+
+# Environment variables
+.env
+
+# Docker volumes
+redis-data/
+prometheus-data/
+postgres-data/
+minio-data/
+
+# System files
+.DS_Store
+Thumbs.db

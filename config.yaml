@@ -1,0 +1,62 @@
+data:
+  train_test_split: 0.3
+  random_state: 42
+  feature_columns:
+    - flow
+    - mass
+    - density
+    - temp
+    - conductivity
+    - BHP_550m
+  target_column: label
+
+preprocessing:
+  scaler: MinMaxScaler
+  handle_imbalance: SMOTE
+  handle_missing: mean
+
+models:
+  neural_network:
+    architecture:
+      - units: 10
+        activation: relu
+      - units: 20
+        activation: relu
+      - units: 1
+        activation: sigmoid
+    optimizer: RMSprop
+    batch_size: 32
+    epochs: 100
+    
+  xgboost:
+    n_estimators: 100
+    max_depth: 6
+    learning_rate: 0.1
+    early_stopping_rounds: 10
+    
+  random_forest:
+    n_estimators: 100
+    max_depth: 10
+    min_samples_split: 2
+    
+  svm:
+    kernel: rbf
+    C: 1.0
+    probability: true
+
+hyperparameter_optimization:
+  tool: optuna
+  n_trials: 100
+  metrics: 
+    - accuracy
+    - f1_score
+    - precision
+    - recall
+    
+mlflow:
+  experiment_name: co2_leakage_detection
+  tracking_uri: ./mlruns
+
+wandb:
+  project: co2_leakage_detection
+  entity: your_username
