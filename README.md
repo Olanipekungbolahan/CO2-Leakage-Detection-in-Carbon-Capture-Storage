@@ -108,6 +108,60 @@ Key metrics tracked:
 - Weights & Biases: Monitor training metrics and model performance
 - API health monitoring endpoint
 
+## Deployment Challenges and Solutions
+
+### Challenge 1: Heroku Slug Size Limit
+Initially, the application exceeded Heroku's slug size limit (500MB) with a size of over 1GB. This was primarily due to:
+- Multiple ML models being deployed
+- Large model weights and dependencies
+- Unused libraries in requirements.txt
+
+Solutions implemented:
+1. Model Optimization
+   - Converted to TFLite format with quantization
+   - Selected single best-performing model (Neural Network, 93.82% accuracy)
+   - Removed ensemble prediction logic
+
+2. Dependency Optimization
+   - Switched to tensorflow-cpu from full tensorflow
+   - Removed unused ML libraries
+   - Minimized requirements to essential packages only
+
+3. Code Optimization
+   - Implemented lazy loading for model and configurations
+   - Added memory usage monitoring
+   - Streamlined API endpoints
+
+Result: Successfully reduced slug size to under 500MB while maintaining model performance.
+
+### Challenge 2: Performance Monitoring
+To ensure reliable production deployment, we implemented comprehensive monitoring:
+
+1. Real-time Metrics
+   - Model prediction latency
+   - Memory usage tracking
+   - Prediction confidence scores
+   - Error rate monitoring
+
+2. Health Checks
+   - Model availability
+   - Prediction accuracy
+   - Resource utilization
+   - API endpoint status
+
+3. Alerting System
+   - Drift detection
+   - Performance degradation alerts
+   - Error rate thresholds
+   - Memory usage warnings
+
+### Best Practices Implemented
+1. Use of TFLite for model optimization
+2. Implementation of lazy loading
+3. Comprehensive monitoring with Prometheus
+4. Regular memory cleanup
+5. Efficient error handling and logging
+
 ## Contributing
 
 1. Fork the repository
