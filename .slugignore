@@ -1,0 +1,44 @@
+# Development files
+*.ipynb
+.git
+.gitignore
+*.pyc
+__pycache__/
+*.pyo
+*.pyd
+.Python
+.env
+.venv
+pip-log.txt
+
+# Test files
+tests/
+.pytest_cache/
+htmlcov/
+.coverage
+.tox/
+
+# Documentation
+*.md
+docs/
+LICENSE
+
+# Data files (we'll load these from external storage)
+*.csv
+datasets/
+
+# Docker files
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Development configs
+.pre-commit-config.yaml
+Makefile
+setup.py
+
+# Monitoring setup (will be handled separately in production)
+monitoring/
+*.json
+*.yml
+!config.yaml

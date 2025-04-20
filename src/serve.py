@@ -5,6 +5,18 @@ import yaml
 import numpy as np
 from preprocessing import DataPreprocessor
 import logging
+import gc
+import os
+
+# Configure TensorFlow to use memory growth and limit GPU memory
+tf.config.set_soft_device_placement(True)
+gpus = tf.config.experimental.list_physical_devices('GPU')
+if gpus:
+    try:
+        for gpu in gpus:
+            tf.config.experimental.set_memory_growth(gpu, True)
+    except RuntimeError as e:
+        print(e)
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -12,26 +24,59 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-# Load configuration and initialize preprocessor
-try:
-    with open('config.yaml', 'r') as f:
-        config = yaml.safe_load(f)
-    preprocessor = DataPreprocessor()
-    logger.info("Successfully loaded config and initialized preprocessor")
-except Exception as e:
-    logger.error(f"Error loading config: {e}")
-    raise
-
-# Load all models
+# Lazy loading of models
 models = {}
-try:
-    models['neural_network'] = tf.keras.models.load_model('models/neural_network_model')
-    models['xgboost'] = joblib.load('models/xgboost_model.joblib')
-    models['random_forest'] = joblib.load('models/random_forest_model.joblib')
-    models['svm'] = joblib.load('models/svm_model.joblib')
-    logger.info(f"Successfully loaded models: {list(models.keys())}")
-except Exception as e:
-    logger.error(f"Error loading models: {e}")
+preprocessor = None
+config = None
+
+def load_config():
+    """Lazy load configuration"""
+    global config
+    if config is None:
+        with open('config.yaml', 'r') as f:
+            config = yaml.safe_load(f)
+    return config
+
+def load_preprocessor():
+    """Lazy load preprocessor"""
+    global preprocessor
+    if preprocessor is None:
+        config = load_config()
+        preprocessor = DataPreprocessor()
+    return preprocessor
+
+def load_model(model_name):
+    """Lazy load specific model"""
+    global models
+    if model_name not in models:
+        try:
+            if model_name == 'neural_network':
+                models[model_name] = tf.keras.models.load_model('models/neural_network_model')
+            else:
+                models[model_name] = joblib.load(f'models/{model_name}_model.joblib')
+            logger.info(f"Successfully loaded model: {model_name}")
+        except Exception as e:
+            logger.error(f"Error loading model {model_name}: {e}")
+            return None
+    return models[model_name]
+
+def get_prediction(model_name, input_data):
+    """Get prediction from a specific model"""
+    model = load_model(model_name)
+    if model is None:
+        return None
+        
+    if model_name == 'neural_network':
+        pred = float((model.predict(input_data, verbose=0) > 0.5)[0][0])
+    else:
+        pred = float(model.predict(input_data)[0])
+    
+    # Clean up memory
+    if model_name == 'neural_network':
+        tf.keras.backend.clear_session()
+    gc.collect()
+    
+    return pred
 
 @app.route('/predict', methods=['POST'])
 def predict():
@@ -40,7 +85,8 @@ def predict():
         data = request.get_json()
         logger.info(f"Received prediction request with data: {data}")
         
-        # Validate input features
+        # Load config and validate input features
+        config = load_config()
         required_features = config['data']['feature_columns']
         if not all(feature in data for feature in required_features):
             error_msg = f'Missing features. Required features: {required_features}'
@@ -48,30 +94,39 @@ def predict():
             return jsonify({'error': error_msg}), 400
             
         # Prepare input data
+        preprocessor = load_preprocessor()
         input_data = np.array([[data[feature] for feature in required_features]])
         input_scaled = preprocessor.scaler.transform(input_data)
         
-        # Make predictions with all models
+        # Make predictions with requested models
         predictions = {}
-        for model_name, model in models.items():
-            if model_name == 'neural_network':
-                pred = float((model.predict(input_scaled) > 0.5)[0][0])
-            else:
-                pred = float(model.predict(input_scaled)[0])
-            predictions[model_name] = pred
-            logger.info(f"{model_name} prediction: {pred}")
+        requested_models = request.args.get('models', 'ensemble').split(',')
+        
+        if 'ensemble' in requested_models:
+            model_names = ['neural_network', 'xgboost', 'random_forest', 'svm']
+        else:
+            model_names = [m for m in requested_models if m != 'ensemble']
             
-        # Calculate ensemble prediction (majority voting)
-        ensemble_pred = int(sum(predictions.values()) > len(predictions)/2)
-        predictions['ensemble'] = ensemble_pred
-        
-        response = {
-            'predictions': predictions,
-            'leak_probability': float(sum(predictions.values()) / len(predictions))
-        }
-        logger.info(f"Returning predictions: {response}")
-        return jsonify(response)
-        
+        for model_name in model_names:
+            pred = get_prediction(model_name, input_scaled)
+            if pred is not None:
+                predictions[model_name] = pred
+                
+        if predictions:
+            # Calculate ensemble prediction if needed
+            if 'ensemble' in requested_models:
+                ensemble_pred = int(sum(predictions.values()) > len(predictions)/2)
+                predictions['ensemble'] = ensemble_pred
+            
+            response = {
+                'predictions': predictions,
+                'leak_probability': float(sum(predictions.values()) / len(predictions))
+            }
+            logger.info(f"Returning predictions: {response}")
+            return jsonify(response)
+        else:
+            return jsonify({'error': 'No models available for prediction'}), 503
+            
     except Exception as e:
         error_msg = f"Error making prediction: {str(e)}"
         logger.error(error_msg)
@@ -80,14 +135,32 @@ def predict():
 @app.route('/health', methods=['GET'])
 def health_check():
     """Health check endpoint."""
-    health_status = {
-        'status': 'healthy' if models else 'degraded',
-        'models_loaded': list(models.keys()),
-        'config_loaded': bool(config),
-        'preprocessor_initialized': bool(preprocessor)
-    }
-    return jsonify(health_status)
+    try:
+        config = load_config()
+        preprocessor = load_preprocessor()
+        
+        # Only load models if specifically requested
+        if request.args.get('check_models', '').lower() == 'true':
+            model_status = {
+                model: load_model(model) is not None
+                for model in ['neural_network', 'xgboost', 'random_forest', 'svm']
+            }
+        else:
+            model_status = "Models will be loaded on demand"
+            
+        health_status = {
+            'status': 'healthy',
+            'config_loaded': bool(config),
+            'preprocessor_initialized': bool(preprocessor),
+            'models': model_status
+        }
+        return jsonify(health_status)
+    except Exception as e:
+        return jsonify({
+            'status': 'unhealthy',
+            'error': str(e)
+        }), 503
 
 if __name__ == '__main__':
-    logger.info("Starting Flask application...")
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port)
