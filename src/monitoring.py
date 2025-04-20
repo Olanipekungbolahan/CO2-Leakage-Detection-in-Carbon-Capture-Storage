@@ -1,139 +1,100 @@
 import numpy as np
 from datetime import datetime, timedelta
-import pandas as pd
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 from typing import Dict, List, Any
-import mlflow
-from prometheus_client import start_http_server, Counter, Histogram, Gauge
-import json
-import redis
-from scipy.stats import chi2_contingency
+from prometheus_client import start_http_server, Counter, Histogram, Gauge, Summary
 import logging
 
+logger = logging.getLogger(__name__)
+
 class ModelMonitor:
-    def __init__(self, redis_host='localhost', redis_port=6379):
-        # Initialize Prometheus metrics
-        self.prediction_latency = Histogram('prediction_latency_seconds', 'Time for model prediction')
-        self.prediction_counter = Counter('prediction_total', 'Total number of predictions', ['model', 'result'])
-        self.feature_drift = Gauge('feature_drift', 'Feature drift score', ['feature'])
-        
-        # Initialize Redis for A/B testing
-        self.redis_client = redis.Redis(host=redis_host, port=redis_port)
-        
-        # Setup logging
-        logging.basicConfig(level=logging.INFO)
-        self.logger = logging.getLogger(__name__)
-        
-    def start_monitoring_server(self, port=8000):
-        """Start Prometheus metrics server"""
-        start_http_server(port)
-        self.logger.info(f"Model monitoring server started on port {port}")
-        
-    def log_prediction(self, model_name: str, features: Dict[str, float], 
-                      prediction: int, latency: float, ground_truth: int = None):
-        """Log prediction details for monitoring"""
-        # Log to MLflow
-        with mlflow.start_run(nested=True):
-            mlflow.log_metrics({
-                'prediction_latency': latency,
-                'prediction': prediction
-            })
-            if ground_truth is not None:
-                mlflow.log_metric('accuracy', int(prediction == ground_truth))
-        
-        # Update Prometheus metrics
-        self.prediction_latency.observe(latency)
-        self.prediction_counter.labels(model=model_name, 
-                                    result='correct' if ground_truth == prediction else 'incorrect'
-                                    ).inc()
-        
-        # Store in Redis for A/B testing
-        prediction_data = {
-            'timestamp': datetime.now().isoformat(),
-            'features': features,
-            'prediction': prediction,
-            'latency': latency,
-            'ground_truth': ground_truth
-        }
-        self.redis_client.lpush(f'predictions:{model_name}', 
-                              json.dumps(prediction_data))
-                              
-    def check_feature_drift(self, current_data: pd.DataFrame, 
-                          reference_data: pd.DataFrame, threshold: float = 0.05):
-        """Monitor feature drift using statistical tests"""
-        drift_detected = False
-        for column in current_data.columns:
-            # Perform Chi-squared test for drift detection
-            hist_current, _ = np.histogram(current_data[column], bins=10)
-            hist_ref, _ = np.histogram(reference_data[column], bins=10)
-            
-            chi2_stat, p_value = chi2_contingency(np.vstack([hist_current, hist_ref]))[:2]
-            
-            # Update Prometheus metric
-            self.feature_drift.labels(feature=column).set(p_value)
-            
-            if p_value < threshold:
-                drift_detected = True
-                self.logger.warning(f"Drift detected in feature {column}: p-value = {p_value}")
-                
-        return drift_detected
-        
-    def ab_test_analysis(self, model_a: str, model_b: str, 
-                        time_window: timedelta = timedelta(days=7)):
-        """Perform A/B testing analysis between two models"""
-        cutoff_time = datetime.now() - time_window
-        
-        # Retrieve data from Redis
-        results_a = self._get_model_results(model_a, cutoff_time)
-        results_b = self._get_model_results(model_b, cutoff_time)
-        
-        if not results_a or not results_b:
-            return None
-            
-        # Calculate metrics for both models
-        metrics_a = self._calculate_metrics(results_a)
-        metrics_b = self._calculate_metrics(results_b)
-        
-        # Perform statistical significance test
-        chi2_stat, p_value = self._calculate_significance(
-            metrics_a['correct'], metrics_a['total'],
-            metrics_b['correct'], metrics_b['total']
+    def __init__(self, port: int = 8000):
+        # Prometheus metrics
+        self.prediction_counter = Counter(
+            'model_predictions_total',
+            'Total number of predictions made',
+            ['result']  # 'correct' or 'incorrect'
         )
         
+        self.prediction_latency = Histogram(
+            'model_prediction_latency_seconds',
+            'Time taken for model prediction',
+            buckets=[0.1, 0.5, 1.0, 2.0, 5.0]
+        )
+        
+        self.prediction_confidence = Histogram(
+            'model_prediction_confidence',
+            'Confidence scores of predictions',
+            buckets=[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+        )
+        
+        self.model_errors = Counter(
+            'model_errors_total',
+            'Total number of model errors'
+        )
+        
+        self.memory_gauge = Gauge(
+            'model_memory_usage_bytes',
+            'Memory usage of the model'
+        )
+        
+        # Performance tracking
+        self.accuracy_gauge = Gauge(
+            'model_accuracy',
+            'Current model accuracy'
+        )
+        
+        self.drift_score = Gauge(
+            'model_drift_score',
+            'Current model drift score'
+        )
+        
+        # Start Prometheus HTTP server
+        start_http_server(port)
+        logger.info(f"Started Prometheus metrics server on port {port}")
+    
+    def log_prediction(self, features: Dict[str, float], prediction: float, 
+                      latency: float, ground_truth: int = None):
+        """Log prediction details for monitoring"""
+        # Log prediction latency
+        self.prediction_latency.observe(latency)
+        
+        # Log prediction confidence
+        self.prediction_confidence.observe(abs(prediction - 0.5) * 2)
+        
+        # Log accuracy if ground truth is available
+        if ground_truth is not None:
+            is_correct = int(prediction > 0.5) == ground_truth
+            self.prediction_counter.labels(
+                result='correct' if is_correct else 'incorrect'
+            ).inc()
+            
+            # Update running accuracy
+            current_acc = float(self.accuracy_gauge._value.get())
+            total_preds = sum(self.prediction_counter.collect()[0].samples[0].value)
+            new_acc = (current_acc * (total_preds - 1) + float(is_correct)) / total_preds
+            self.accuracy_gauge.set(new_acc)
+    
+    def log_error(self, error_type: str):
+        """Log model errors"""
+        self.model_errors.inc()
+        logger.error(f"Model error occurred: {error_type}")
+    
+    def update_memory_usage(self, bytes_used: int):
+        """Update model memory usage metric"""
+        self.memory_gauge.set(bytes_used)
+    
+    def update_drift_score(self, score: float):
+        """Update feature drift score"""
+        self.drift_score.set(score)
+        if score > 0.1:  # Alert threshold
+            logger.warning(f"High drift score detected: {score}")
+    
+    def get_current_metrics(self) -> Dict[str, float]:
+        """Get current monitoring metrics"""
         return {
-            'model_a': metrics_a,
-            'model_b': metrics_b,
-            'p_value': p_value,
-            'significant_difference': p_value < 0.05
+            'accuracy': float(self.accuracy_gauge._value.get()),
+            'drift_score': float(self.drift_score._value.get()),
+            'error_rate': float(self.model_errors._value.get()) / max(1, sum(self.prediction_counter.collect()[0].samples[0].value)),
+            'avg_latency': float(sum(self.prediction_latency._sum.get()) / max(1, self.prediction_latency._count.get())),
+            'memory_usage_mb': float(self.memory_gauge._value.get()) / (1024 * 1024)
         }
-        
-    def _get_model_results(self, model_name: str, cutoff_time: datetime):
-        """Retrieve model results from Redis"""
-        results = []
-        for item in self.redis_client.lrange(f'predictions:{model_name}', 0, -1):
-            data = json.loads(item)
-            if datetime.fromisoformat(data['timestamp']) >= cutoff_time:
-                results.append(data)
-        return results
-        
-    def _calculate_metrics(self, results: List[Dict[str, Any]]):
-        """Calculate metrics for A/B testing"""
-        total = len(results)
-        correct = sum(1 for r in results if r['prediction'] == r['ground_truth'])
-        avg_latency = np.mean([r['latency'] for r in results])
-        
-        return {
-            'total': total,
-            'correct': correct,
-            'accuracy': correct/total if total > 0 else 0,
-            'avg_latency': avg_latency
-        }
-        
-    def _calculate_significance(self, correct_a: int, total_a: int, 
-                              correct_b: int, total_b: int):
-        """Calculate statistical significance using chi-square test"""
-        contingency_table = np.array([
-            [correct_a, total_a - correct_a],
-            [correct_b, total_b - correct_b]
-        ])
-        return chi2_contingency(contingency_table)[:2]

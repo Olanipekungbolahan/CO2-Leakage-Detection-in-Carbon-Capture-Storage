@@ -1,12 +1,14 @@
 from flask import Flask, request, jsonify
 import tensorflow as tf
-import joblib
 import yaml
 import numpy as np
 from preprocessing import DataPreprocessor
+from monitoring import ModelMonitor
 import logging
 import gc
 import os
+import time
+import psutil
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -18,6 +20,7 @@ app = Flask(__name__)
 tflite_interpreter = None
 preprocessor = None
 config = None
+monitor = ModelMonitor(port=8000)
 
 def load_config():
     """Lazy load configuration"""
@@ -39,29 +42,60 @@ def load_tflite_model():
     """Load TFLite model"""
     global tflite_interpreter
     if tflite_interpreter is None:
-        model_path = 'models/model_quantized.tflite'
-        if os.path.exists(model_path):
-            tflite_interpreter = tf.lite.Interpreter(model_path=model_path)
-            tflite_interpreter.allocate_tensors()
-            logger.info("Successfully loaded TFLite model")
-        else:
-            logger.error("TFLite model not found")
+        try:
+            model_path = 'models/model_quantized.tflite'
+            if os.path.exists(model_path):
+                tflite_interpreter = tf.lite.Interpreter(model_path=model_path)
+                tflite_interpreter.allocate_tensors()
+                logger.info("Successfully loaded TFLite model")
+                
+                # Log initial memory usage
+                process = psutil.Process(os.getpid())
+                monitor.update_memory_usage(process.memory_info().rss)
+            else:
+                logger.error("TFLite model not found")
+                monitor.log_error("Model not found")
+        except Exception as e:
+            logger.error(f"Error loading model: {e}")
+            monitor.log_error(f"Model loading error: {str(e)}")
     return tflite_interpreter
 
 def get_prediction(input_data):
     """Get prediction from the neural network model"""
-    interpreter = load_tflite_model()
-    if interpreter is None:
-        return None
+    start_time = time.time()
+    try:
+        interpreter = load_tflite_model()
+        if interpreter is None:
+            monitor.log_error("Model not loaded")
+            return None
+            
+        input_details = interpreter.get_input_details()
+        output_details = interpreter.get_output_details()
         
-    input_details = interpreter.get_input_details()
-    output_details = interpreter.get_output_details()
-    
-    interpreter.set_tensor(input_details[0]['index'], input_data.astype(np.float32))
-    interpreter.invoke()
-    
-    output_data = interpreter.get_tensor(output_details[0]['index'])
-    return float(output_data[0][0] > 0.5)
+        interpreter.set_tensor(input_details[0]['index'], input_data.astype(np.float32))
+        interpreter.invoke()
+        
+        output_data = interpreter.get_tensor(output_details[0]['index'])
+        prediction = float(output_data[0][0])
+        
+        # Log prediction latency
+        latency = time.time() - start_time
+        monitor.log_prediction(
+            features={f"feature_{i}": val for i, val in enumerate(input_data[0])},
+            prediction=prediction,
+            latency=latency
+        )
+        
+        # Update memory usage
+        process = psutil.Process(os.getpid())
+        monitor.update_memory_usage(process.memory_info().rss)
+        
+        return prediction > 0.5
+        
+    except Exception as e:
+        logger.error(f"Prediction error: {e}")
+        monitor.log_error(f"Prediction error: {str(e)}")
+        return None
 
 @app.route('/predict', methods=['POST'])
 def predict():
@@ -76,6 +110,7 @@ def predict():
         if not all(feature in data for feature in required_features):
             error_msg = f'Missing features. Required features: {required_features}'
             logger.error(error_msg)
+            monitor.log_error("Missing features")
             return jsonify({'error': error_msg}), 400
             
         # Prepare input data
@@ -83,7 +118,7 @@ def predict():
         input_data = np.array([[data[feature] for feature in required_features]])
         input_scaled = preprocessor.scaler.transform(input_data)
         
-        # Get prediction from neural network model
+        # Get prediction
         prediction = get_prediction(input_scaled)
         if prediction is not None:
             response = {
@@ -98,6 +133,7 @@ def predict():
     except Exception as e:
         error_msg = f"Error making prediction: {str(e)}"
         logger.error(error_msg)
+        monitor.log_error(f"API error: {str(e)}")
         return jsonify({'error': error_msg}), 500
 
 @app.route('/health', methods=['GET'])
@@ -108,11 +144,15 @@ def health_check():
         preprocessor = load_preprocessor()
         model = load_tflite_model()
         
+        # Get current metrics
+        metrics = monitor.get_current_metrics()
+        
         health_status = {
             'status': 'healthy',
             'config_loaded': bool(config),
             'preprocessor_initialized': bool(preprocessor),
-            'model_loaded': model is not None
+            'model_loaded': model is not None,
+            'metrics': metrics
         }
         return jsonify(health_status)
     except Exception as e:
