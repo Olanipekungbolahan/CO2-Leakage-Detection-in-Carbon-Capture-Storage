@@ -5,6 +5,10 @@ import numpy as np
 from tensorflow.keras import Model
 from tensorflow_model_optimization.quantization.keras import quantize_model
 import mlflow
+import joblib
+from sklearn.preprocessing import StandardScaler
+import tensorflow_model_optimization as tfmot
+import os
 
 class ModelOptimizer:
     def __init__(self):
@@ -85,3 +89,63 @@ class ModelOptimizer:
         
         mlflow.log_metrics(metrics)
         return metrics
+
+    def optimize_tensorflow_model(self, model_path):
+        """Optimize TensorFlow model through quantization"""
+        # Load the model
+        model = tf.keras.models.load_model(model_path)
+        
+        # Apply quantization aware training
+        quantize_model = tfmot.quantization.keras.quantize_model
+        
+        # Create quantized model
+        q_aware_model = quantize_model(model)
+        
+        # Convert to TFLite
+        converter = tf.lite.TFLiteConverter.from_keras_model(q_aware_model)
+        converter.optimizations = [tf.lite.Optimize.DEFAULT]
+        converter.target_spec.supported_types = [tf.float16]
+        
+        tflite_model = converter.convert()
+        
+        # Save the quantized model
+        tflite_path = os.path.join(os.path.dirname(model_path), 'model_quantized.tflite')
+        with open(tflite_path, 'wb') as f:
+            f.write(tflite_model)
+            
+        return tflite_path
+
+    def optimize_sklearn_model(self, model_path):
+        """Optimize scikit-learn based models through pruning"""
+        model = joblib.load(model_path)
+        
+        # For tree-based models, reduce number of estimators if possible
+        if hasattr(model, 'estimators_'):
+            n_estimators = len(model.estimators_)
+            if n_estimators > 50:  # Keep minimum 50 estimators
+                model.estimators_ = model.estimators_[:50]
+        
+        # Save optimized model with compression
+        optimized_path = model_path.replace('.joblib', '_optimized.joblib')
+        joblib.dump(model, optimized_path, compress=9)
+        
+        return optimized_path
+
+def optimize_all_models():
+    """Optimize all models in the models directory"""
+    optimizer = ModelOptimizer()
+    models_dir = 'models'
+    
+    # Optimize neural network
+    nn_path = os.path.join(models_dir, 'neural_network_model')
+    if os.path.exists(nn_path):
+        optimizer.optimize_tensorflow_model(nn_path)
+    
+    # Optimize scikit-learn models
+    for model_name in ['xgboost', 'random_forest', 'svm']:
+        model_path = os.path.join(models_dir, f'{model_name}_model.joblib')
+        if os.path.exists(model_path):
+            optimizer.optimize_sklearn_model(model_path)
+
+if __name__ == '__main__':
+    optimize_all_models()

@@ -8,16 +8,6 @@ import logging
 import gc
 import os
 
-# Configure TensorFlow to use memory growth and limit GPU memory
-tf.config.set_soft_device_placement(True)
-gpus = tf.config.experimental.list_physical_devices('GPU')
-if gpus:
-    try:
-        for gpu in gpus:
-            tf.config.experimental.set_memory_growth(gpu, True)
-    except RuntimeError as e:
-        print(e)
-
 # Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -26,6 +16,7 @@ app = Flask(__name__)
 
 # Lazy loading of models
 models = {}
+tflite_interpreter = None
 preprocessor = None
 config = None
 
@@ -45,37 +36,62 @@ def load_preprocessor():
         preprocessor = DataPreprocessor()
     return preprocessor
 
+def load_tflite_model():
+    """Load TFLite model"""
+    global tflite_interpreter
+    if tflite_interpreter is None:
+        model_path = 'models/model_quantized.tflite'
+        if os.path.exists(model_path):
+            tflite_interpreter = tf.lite.Interpreter(model_path=model_path)
+            tflite_interpreter.allocate_tensors()
+            logger.info("Successfully loaded TFLite model")
+        else:
+            logger.error("TFLite model not found")
+    return tflite_interpreter
+
 def load_model(model_name):
     """Lazy load specific model"""
     global models
     if model_name not in models:
         try:
             if model_name == 'neural_network':
-                models[model_name] = tf.keras.models.load_model('models/neural_network_model')
+                return load_tflite_model()
             else:
-                models[model_name] = joblib.load(f'models/{model_name}_model.joblib')
-            logger.info(f"Successfully loaded model: {model_name}")
+                model_path = f'models/{model_name}_model_optimized.joblib'
+                if not os.path.exists(model_path):
+                    model_path = f'models/{model_name}_model.joblib'
+                models[model_name] = joblib.load(model_path)
+                logger.info(f"Successfully loaded model: {model_name}")
         except Exception as e:
             logger.error(f"Error loading model {model_name}: {e}")
             return None
     return models[model_name]
 
+def get_tflite_prediction(interpreter, input_data):
+    """Get prediction from TFLite model"""
+    input_details = interpreter.get_input_details()
+    output_details = interpreter.get_output_details()
+    
+    interpreter.set_tensor(input_details[0]['index'], input_data.astype(np.float32))
+    interpreter.invoke()
+    
+    output_data = interpreter.get_tensor(output_details[0]['index'])
+    return float(output_data[0][0] > 0.5)
+
 def get_prediction(model_name, input_data):
     """Get prediction from a specific model"""
+    if model_name == 'neural_network':
+        interpreter = load_tflite_model()
+        if interpreter is None:
+            return None
+        return get_tflite_prediction(interpreter, input_data)
+    
     model = load_model(model_name)
     if model is None:
         return None
         
-    if model_name == 'neural_network':
-        pred = float((model.predict(input_data, verbose=0) > 0.5)[0][0])
-    else:
-        pred = float(model.predict(input_data)[0])
-    
-    # Clean up memory
-    if model_name == 'neural_network':
-        tf.keras.backend.clear_session()
+    pred = float(model.predict(input_data)[0])
     gc.collect()
-    
     return pred
 
 @app.route('/predict', methods=['POST'])
